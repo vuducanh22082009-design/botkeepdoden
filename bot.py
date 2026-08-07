@@ -593,3 +593,4 @@ if __name__ == '__main__':
         print("❌ Lỗi: Chưa tìm thấy DISCORD_TOKEN trong file .env!")
     else:
         bot.run(TOKEN)
+        #
