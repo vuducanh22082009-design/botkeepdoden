@@ -301,6 +301,10 @@ def set_balance(
     last_daily: Optional[float] = None
 ):
     cursor = conn.cursor()
+    cursor.execute(
+        'INSERT OR IGNORE INTO users (user_id, balance, last_daily) VALUES (?, 0, 0)',
+        (user_id,)
+    )
 
     if last_daily is not None:
         cursor.execute(
@@ -361,7 +365,10 @@ def get_luck_multiplier(user_id: int):
     ).fetchall()
     if not rows:
         return 1, 0
-    best_item = max(rows, key=lambda row: SHOP_ITEMS.get(row[0], {}).get('multiplier', 1))
+    valid_rows = [row for row in rows if row[0] in SHOP_ITEMS]
+    if not valid_rows:
+        return 1, 0
+    best_item = max(valid_rows, key=lambda row: SHOP_ITEMS[row[0]]['multiplier'])
     return SHOP_ITEMS[best_item[0]]['multiplier'], best_item[2]
 
 
@@ -387,6 +394,43 @@ def add_shop_item(user_id: int, item_key: str):
     )
     conn.commit()
     return expires_at
+
+
+def purchase_shop_item(user_id: int, item_key: str):
+    """Trừ tiền và thêm vật phẩm trong cùng một transaction SQLite."""
+    item = SHOP_ITEMS[item_key]
+    now = time.time()
+    with conn:
+        row = conn.execute(
+            'SELECT balance FROM users WHERE user_id = ?',
+            (user_id,)
+        ).fetchone()
+        if row is None or row[0] < item['price']:
+            return None
+
+        current = conn.execute(
+            'SELECT quantity, expires_at FROM inventory WHERE user_id = ? AND item_key = ?',
+            (user_id, item_key)
+        ).fetchone()
+        start_at = max(now, current[1]) if current else now
+        expires_at = start_at + item['duration']
+        quantity = current[0] + 1 if current and current[1] > now else 1
+
+        conn.execute(
+            'UPDATE users SET balance = balance - ? WHERE user_id = ?',
+            (item['price'], user_id)
+        )
+        conn.execute(
+            '''
+            INSERT INTO inventory (user_id, item_key, quantity, expires_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id, item_key) DO UPDATE SET
+                quantity = excluded.quantity,
+                expires_at = excluded.expires_at
+            ''',
+            (user_id, item_key, quantity, expires_at)
+        )
+    return expires_at, row[0] - item['price']
 
 
 def parse_bet(
@@ -460,20 +504,22 @@ async def on_ready():
     print(f'✅ MinaBot ({bot.user}) đã sẵn sàng!')
 
     if not guild_commands_synced:
+        all_guilds_synced = True
         for guild in bot.guilds:
             try:
                 tree.copy_global_to(guild=guild)
                 synced = await tree.sync(guild=guild)
                 print(f'✅ Đã đồng bộ {len(synced)} lệnh cho server: {guild.name}')
             except Exception as e:
+                all_guilds_synced = False
                 print(f'❌ Không đồng bộ được lệnh cho {guild.name}: {e}')
-        guild_commands_synced = True
+        guild_commands_synced = bool(bot.guilds) and all_guilds_synced
 
 
 @bot.event
 async def on_message(message: discord.Message):
     """Cộng XP tối đa một lần mỗi phút để khuyến khích trò chuyện, chống spam."""
-    if message.author.bot:
+    if message.author.bot or message.guild is None:
         return
 
     _, last_xp = get_xp(message.author.id)
@@ -1180,20 +1226,21 @@ async def money_pay_all(
         )
         return
 
-    each_amount = parsed_amount // len(users)
+    each_amount, remainder = divmod(parsed_amount, len(users))
 
     set_balance(
         sender_id,
         sender_balance - parsed_amount
     )
 
-    for (uid,) in users:
+    for index, (uid,) in enumerate(users):
 
         bal, _ = get_user(uid)
+        share = each_amount + (1 if index < remainder else 0)
 
         set_balance(
             uid,
-            bal + each_amount
+            bal + share
         )
 
     await interaction.response.send_message(
@@ -1242,6 +1289,13 @@ async def admin_pay(
         1_000_000_000_000,
         amount
     )
+
+    if parsed_amount is None or parsed_amount <= 0:
+        await interaction.response.send_message(
+            f'❌ Số tiền không hợp lệ. Hãy nhập ví dụ `50k`, `1M` hoặc `all`.\n\n*{FOOTER_TEXT}*',
+            ephemeral=True
+        )
+        return
 
     target_user = (
         member
@@ -1296,6 +1350,13 @@ async def admin_take(
         amount
     )
 
+    if parsed_amount is None or parsed_amount <= 0:
+        await interaction.response.send_message(
+            f'❌ Số tiền không hợp lệ. Hãy nhập ví dụ `50k`, `1M` hoặc `all`.\n\n*{FOOTER_TEXT}*',
+            ephemeral=True
+        )
+        return
+
     new_balance = max(
         0,
         balance - parsed_amount
@@ -1335,6 +1396,13 @@ async def admin_setbalance(
         1_000_000_000_000,
         amount
     )
+
+    if parsed_amount is None or parsed_amount <= 0:
+        await interaction.response.send_message(
+            f'❌ Số tiền không hợp lệ. Hãy nhập ví dụ `50k`, `1M` hoặc `all`.\n\n*{FOOTER_TEXT}*',
+            ephemeral=True
+        )
+        return
 
     set_balance(
         member.id,
@@ -1406,6 +1474,12 @@ async def reset_money(
             f'🧹 **[ADMIN]** Đã reset số dư của '
             f'{member.mention} về **0 VNĐ**.\n\n'
             f'*{FOOTER_TEXT}*'
+        )
+
+    else:
+        await interaction.response.send_message(
+            f'❌ Hãy chọn một người chơi hoặc bật `reset_all`.\n\n*{FOOTER_TEXT}*',
+            ephemeral=True
         )
 
 
@@ -1729,14 +1803,21 @@ async def shop_buy(interaction: discord.Interaction, item: app_commands.Choice[s
         await interaction.response.send_message(embed=style_embed(embed), ephemeral=True)
         return
 
-    set_balance(interaction.user.id, balance - item_data['price'])
-    expires_at = add_shop_item(interaction.user.id, item.value)
+    purchase = purchase_shop_item(interaction.user.id, item.value)
+    if purchase is None:
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed('MUA HÀNG THẤT BẠI', 'Số dư vừa thay đổi, vui lòng kiểm tra lại rồi thử lại nhé.')),
+            ephemeral=True
+        )
+        return
+
+    expires_at, new_balance = purchase
     remaining_minutes = max(1, int((expires_at - time.time()) / 60))
     embed = neon_embed(
         'MUA HÀNG THÀNH CÔNG',
         f'🍀 Bạn đã mua **{item_data["name"]}** với giá **{format_money(item_data["price"])}**.\n\n'
         f'Bùa đã tự kích hoạt, còn khoảng **{remaining_minutes} phút**.\n'
-        f'Số dư còn lại: **{format_money(balance - item_data["price"])}**.'
+        f'Số dư còn lại: **{format_money(new_balance)}**.'
     )
     await interaction.response.send_message(embed=style_embed(embed))
 
