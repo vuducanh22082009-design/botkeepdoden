@@ -732,7 +732,7 @@ async def menu(interaction: discord.Interaction):
             '`/profile [@user]` - Xem thông tin người dùng\n'
             '`/memebot` - Spam tên vui nhộn\n'
             '`/donate` - Ủng hộ nhà phát triển\n'
-            '`/ship` | `/roast` | `/hug` | `/rps` - Tương tác vui\n'
+            '`/ship @user1 @user2` | `/roast` | `/hug` | `/rps` - Tương tác vui\n'
             '`/meme` | `/joke` | `/quote` | `/fact` - Nội dung giải trí\n'
             '`/cat` | `/dog` - Ảnh động vật ngẫu nhiên\n'
             '`/fortune` - Bói vui từ rank Bạc\n'
@@ -2223,13 +2223,28 @@ MASTER_TRIALS = [
 ]
 
 
-@tree.command(name='ship', description='Tính độ hợp nhau vui giữa hai người')
-@app_commands.describe(member='Người muốn ghép đôi')
-async def ship(interaction: discord.Interaction, member: Optional[discord.Member] = None):
-    member = member or interaction.user
-    score = 100 if member.id == interaction.user.id else random.randint(1, 100)
+@tree.command(name='ship', description='Ghép đôi độ hợp nhau giữa hai thành viên')
+@app_commands.describe(
+    member1='Thành viên thứ nhất',
+    member2='Thành viên thứ hai'
+)
+async def ship(
+    interaction: discord.Interaction,
+    member1: discord.Member,
+    member2: discord.Member
+):
+    if member1.id == member2.id:
+        await interaction.response.send_message(
+            'Hãy chọn **hai thành viên khác nhau** để ship nhé!\n\n'
+            f'*{FOOTER_TEXT}*',
+            ephemeral=True
+        )
+        return
+
+    score = random.randint(1, 100)
     mood = 'định mệnh rồi đó 💞' if score >= 80 else 'có tiềm năng, cứ nói chuyện thêm nhé ✨' if score >= 50 else 'bạn bè cũng là một loại duyên mà 😄'
-    embed = neon_embed('SHIP METER', f'{interaction.user.mention} 💘 {member.mention}')
+    embed = neon_embed('SHIP METER', f'{member1.mention} 💘 {member2.mention}')
+    embed.add_field(name='💑 Cặp đôi', value=f'{member1.display_name} × {member2.display_name}', inline=False)
     embed.add_field(name='💖 Độ hợp nhau', value=f'**{score}%**', inline=False)
     embed.add_field(name='🔮 Kết luận', value=mood, inline=False)
     await interaction.response.send_message(embed=style_embed(embed))
