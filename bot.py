@@ -120,6 +120,7 @@ intents.message_content = True
 
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
+guild_commands_synced = False
 
 
 # =========================================================
@@ -455,7 +456,18 @@ async def setup_hook():
 
 @bot.event
 async def on_ready():
+    global guild_commands_synced
     print(f'✅ MinaBot ({bot.user}) đã sẵn sàng!')
+
+    if not guild_commands_synced:
+        for guild in bot.guilds:
+            try:
+                tree.copy_global_to(guild=guild)
+                synced = await tree.sync(guild=guild)
+                print(f'✅ Đã đồng bộ {len(synced)} lệnh cho server: {guild.name}')
+            except Exception as e:
+                print(f'❌ Không đồng bộ được lệnh cho {guild.name}: {e}')
+        guild_commands_synced = True
 
 
 @bot.event
