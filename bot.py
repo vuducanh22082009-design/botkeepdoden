@@ -6,6 +6,8 @@ import random
 import time
 import sqlite3
 import os
+import json
+import urllib.request
 from typing import Optional
 from dotenv import load_dotenv
 from flask import Flask
@@ -17,6 +19,39 @@ from flask import Flask
 
 ADMIN_ID = 1026417896114630676
 FOOTER_TEXT = "code bot by ducanh | MinaBot"
+
+NEON_COLORS = [
+    0xff00cc,
+    0x00e5ff,
+    0x7d2cff,
+    0x39ff14,
+    0xff1493,
+]
+
+RANKS = [
+    ("Đồng", "🥉", 0, "Huy hiệu Đồng và giao diện neon cơ bản"),
+    ("Bạc", "🥈", 100, "Được mở khóa lệnh bói vui và khung hồ sơ Bạc"),
+    ("Vàng", "🥇", 500, "Được dùng danh hiệu Vàng trong các lệnh tương tác"),
+    ("Kim Cương", "💎", 1500, "Huy hiệu Kim Cương và hiệu ứng neon đặc biệt"),
+    ("Cao Thủ", "👑", 5000, "Huy hiệu Cao Thủ và danh hiệu tối thượng"),
+]
+
+MEME_API_URL = "https://api.imgflip.com/get_memes"
+MEME_CACHE = {"expires": 0.0, "memes": []}
+MEME_CACHE_TTL = 3600
+FAMOUS_MEME_KEYWORDS = (
+    "Drake Hotline Bling",
+    "Distracted Boyfriend",
+    "Two Buttons",
+    "One Does Not Simply",
+    "Disaster Girl",
+    "Change My Mind",
+    "Expanding Brain",
+    "Mocking SpongeBob",
+    "Always Has Been",
+    "This Is Fine",
+    "Hide the Pain Harold",
+)
 
 
 # =========================================================
@@ -73,6 +108,72 @@ conn = sqlite3.connect(
 )
 
 
+def neon_color():
+    """Đổi màu neon theo thời gian để mỗi embed có cảm giác chuyển màu."""
+    return NEON_COLORS[int(time.time() / 2) % len(NEON_COLORS)]
+
+
+def neon_embed(title: str, description: str = "", **kwargs):
+    """Tạo embed giao diện neon dùng chung cho các tính năng giải trí."""
+    embed = discord.Embed(
+        title=f"✨ {title} ✨",
+        description=description,
+        color=neon_color(),
+        **kwargs
+    )
+    embed.set_footer(text=f"🌈 {FOOTER_TEXT} • neon mode")
+    return embed
+
+
+def style_embed(embed: discord.Embed):
+    """Áp dụng màu neon chuyển đổi cho cả embed cũ và embed mới."""
+    embed.color = neon_color()
+    embed.set_footer(text=f"🌈 {FOOTER_TEXT} • neon mode")
+    return embed
+
+
+def rank_for_xp(xp: int):
+    current = RANKS[0]
+    for rank in RANKS:
+        if xp >= rank[2]:
+            current = rank
+    return current
+
+
+def next_rank_for_xp(xp: int):
+    for rank in RANKS:
+        if xp < rank[2]:
+            return rank
+    return None
+
+
+def _fetch_meme_templates():
+    request = urllib.request.Request(
+        MEME_API_URL,
+        headers={"User-Agent": "MinaBot/1.0 meme-command"}
+    )
+    with urllib.request.urlopen(request, timeout=8) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if not payload.get("success"):
+        raise RuntimeError("Imgflip không trả về dữ liệu meme")
+    return payload["data"]["memes"]
+
+
+async def get_random_meme():
+    now = time.time()
+    if now >= MEME_CACHE["expires"] or not MEME_CACHE["memes"]:
+        try:
+            MEME_CACHE["memes"] = await asyncio.to_thread(_fetch_meme_templates)
+            MEME_CACHE["expires"] = now + MEME_CACHE_TTL
+        except Exception:
+            return None
+    famous = [
+        meme for meme in MEME_CACHE["memes"]
+        if any(keyword.lower() in meme.get("name", "").lower() for keyword in FAMOUS_MEME_KEYWORDS)
+    ]
+    return random.choice(famous or MEME_CACHE["memes"])
+
+
 def init_db():
     """Khởi tạo các bảng cơ sở dữ liệu."""
 
@@ -97,6 +198,15 @@ def init_db():
                 timestamp REAL
             )
         ''')
+
+        columns = {
+            row[1]
+            for row in conn.execute('PRAGMA table_info(users)').fetchall()
+        }
+        if 'xp' not in columns:
+            conn.execute('ALTER TABLE users ADD COLUMN xp INTEGER DEFAULT 0')
+        if 'last_xp' not in columns:
+            conn.execute('ALTER TABLE users ADD COLUMN last_xp REAL DEFAULT 0')
 
 
 init_db()
@@ -180,6 +290,30 @@ def set_balance(
     conn.commit()
 
 
+def get_xp(user_id: int):
+    cursor = conn.cursor()
+    cursor.execute(
+        'SELECT xp, last_xp FROM users WHERE user_id = ?',
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    if row is None:
+        get_user(user_id)
+        return 0, 0.0
+    return row
+
+
+def add_xp(user_id: int, amount: int = 5):
+    xp, _ = get_xp(user_id)
+    new_xp = xp + amount
+    conn.execute(
+        'UPDATE users SET xp = ?, last_xp = ? WHERE user_id = ?',
+        (new_xp, time.time(), user_id)
+    )
+    conn.commit()
+    return new_xp
+
+
 def parse_bet(
     balance: int,
     amount_str: str
@@ -250,6 +384,17 @@ async def on_ready():
     print(f'✅ MinaBot ({bot.user}) đã sẵn sàng!')
 
 
+@bot.event
+async def on_message(message: discord.Message):
+    """Cộng XP tối đa một lần mỗi phút để khuyến khích trò chuyện, chống spam."""
+    if message.author.bot:
+        return
+
+    _, last_xp = get_xp(message.author.id)
+    if time.time() - last_xp >= 60:
+        add_xp(message.author.id, random.randint(5, 12))
+
+
 # =========================================================
 # LỆNH MENU
 # =========================================================
@@ -275,7 +420,8 @@ async def menu(interaction: discord.Interaction):
             '`/money pay_all` - Phát lì xì toàn server\n'
             '`/tx` - Cược Tài Xỉu\n'
             '`/cuop` - Cướp tiền với câu hỏi hại não (10% thắng)\n'
-            '`/tx_history` - Lịch sử cược Tài Xỉu'
+            '`/tx_history` - Lịch sử cược Tài Xỉu\n'
+            '`/rank` | `/rank_top` - XP và bảng rank'
         ),
         inline=False
     )
@@ -286,7 +432,10 @@ async def menu(interaction: discord.Interaction):
             '`/avatar [@user]` - Xem ảnh đại diện\n'
             '`/profile [@user]` - Xem thông tin người dùng\n'
             '`/memebot` - Spam tên vui nhộn\n'
-            '`/donate` - Ủng hộ nhà phát triển'
+            '`/donate` - Ủng hộ nhà phát triển\n'
+            '`/ship` | `/roast` | `/hug` | `/rps` - Tương tác vui\n'
+            '`/meme` | `/joke` | `/quote` | `/fact` - Nội dung giải trí\n'
+            '`/cat` | `/dog` - Ảnh động vật ngẫu nhiên'
         ),
         inline=False
     )
@@ -308,7 +457,7 @@ async def menu(interaction: discord.Interaction):
 
     embed.set_footer(text=FOOTER_TEXT)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=style_embed(embed))
 
 
 # =========================================================
@@ -337,7 +486,7 @@ async def avatar(
     embed.set_image(url=target.display_avatar.url)
     embed.set_footer(text=FOOTER_TEXT)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=style_embed(embed))
 
 
 @tree.command(
@@ -403,7 +552,7 @@ async def profile(
 
     embed.set_footer(text=FOOTER_TEXT)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=style_embed(embed))
 
 
 @tree.command(
@@ -605,7 +754,7 @@ class RobView(discord.ui.View):
         embed.set_footer(text=FOOTER_TEXT)
 
         await interaction.response.edit_message(
-            embed=embed,
+            embed=style_embed(embed),
             view=self
         )
 
@@ -669,7 +818,7 @@ async def cuop(
     )
 
     await interaction.response.send_message(
-        embed=embed,
+        embed=style_embed(embed),
         view=view
     )
 
@@ -808,7 +957,7 @@ async def money_top(
     embed.set_footer(text=FOOTER_TEXT)
 
     await interaction.response.send_message(
-        embed=embed
+        embed=style_embed(embed)
     )
 
 
@@ -1188,7 +1337,7 @@ async def donate(
     )
 
     await interaction.response.send_message(
-        embed=embed
+        embed=style_embed(embed)
     )
 
 
@@ -1346,7 +1495,7 @@ async def tx(
     )
 
     await interaction.response.send_message(
-        embed=embed
+        embed=style_embed(embed)
     )
 
 
@@ -1421,9 +1570,170 @@ async def tx_history(
     )
 
     await interaction.response.send_message(
-        embed=embed,
+        embed=style_embed(embed),
         ephemeral=True
     )
+
+
+# =========================================================
+# TƯƠNG TÁC, XP/RANK VÀ NỘI DUNG GIẢI TRÍ
+# =========================================================
+
+ROASTS = [
+    "hôm nay trông bạn như vừa thua 7 ván Tài Xỉu liên tiếp vậy 😭",
+    "bạn không lười, bạn chỉ đang chạy chế độ tiết kiệm năng lượng thôi 🔋",
+    "vũ trụ có nhiều bí ẩn, nhưng sự tự tin của bạn là bí ẩn lớn nhất 🌌",
+    "bạn là phiên bản beta rất có tiềm năng của chính mình 🧪",
+]
+
+JOKES = [
+    "Tại sao máy tính đi khám bệnh? Vì nó bị virus.",
+    "Lập trình viên thích mùa đông vì có nhiều bug để bắt.",
+    "Tôi định kể một câu đùa về UDP... nhưng không chắc bạn sẽ nhận được.",
+    "Con mèo nói gì khi dùng Discord? Meow-derator!",
+]
+
+QUOTES = [
+    "Không cần nhanh nhất, chỉ cần đừng bỏ cuộc giữa chừng.",
+    "Hôm nay là một ngày tốt để tạo thêm một kỷ niệm vui.",
+    "Bạn không cần hoàn hảo để trở nên đáng nhớ.",
+    "Một tin nhắn vui có thể cứu cả một ngày buồn.",
+]
+
+FACTS = [
+    "Bạch tuộc có ba trái tim.",
+    "Mật ong có thể bảo quản rất lâu nếu được giữ kín.",
+    "Một ngày trên sao Kim dài hơn một năm trên sao Kim.",
+    "Chuối là một loại quả mọng theo định nghĩa thực vật học.",
+]
+
+
+@tree.command(name='ship', description='Tính độ hợp nhau vui giữa hai người')
+@app_commands.describe(member='Người muốn ghép đôi')
+async def ship(interaction: discord.Interaction, member: discord.Member):
+    score = random.randint(1, 100)
+    mood = 'định mệnh rồi đó 💞' if score >= 80 else 'có tiềm năng, cứ nói chuyện thêm nhé ✨' if score >= 50 else 'bạn bè cũng là một loại duyên mà 😄'
+    embed = neon_embed('SHIP METER', f'{interaction.user.mention} 💘 {member.mention}')
+    embed.add_field(name='💖 Độ hợp nhau', value=f'**{score}%**', inline=False)
+    embed.add_field(name='🔮 Kết luận', value=mood, inline=False)
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='roast', description='Cà khịa vui, không ác ý')
+@app_commands.describe(member='Người muốn cà khịa')
+async def roast(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    target = member or interaction.user
+    embed = neon_embed('ROAST NHẸ NHÀNG', f'🎤 {target.mention}\n\n{random.choice(ROASTS)}')
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='hug', description='Gửi một cái ôm ảo')
+@app_commands.describe(member='Người nhận cái ôm')
+async def hug(interaction: discord.Interaction, member: discord.Member):
+    embed = neon_embed('CÁI ÔM NEON', f'🤗 {interaction.user.mention} đã ôm {member.mention}!\n\nLan tỏa năng lượng tích cực nhé ✨')
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='rps', description='Chơi kéo búa bao với một thành viên')
+@app_commands.describe(member='Đối thủ', choice='Chọn keo, bua hoặc bao')
+@app_commands.choices(choice=[
+    app_commands.Choice(name='Kéo', value='keo'),
+    app_commands.Choice(name='Búa', value='bua'),
+    app_commands.Choice(name='Bao', value='bao'),
+])
+async def rps(interaction: discord.Interaction, member: discord.Member, choice: app_commands.Choice[str]):
+    options = ['keo', 'bua', 'bao']
+    bot_choice = random.choice(options)
+    wins = {('keo', 'bao'), ('bua', 'keo'), ('bao', 'bua')}
+    result = 'Hòa!' if choice.value == bot_choice else 'Bạn thắng!' if (choice.value, bot_choice) in wins else 'Bạn thua!'
+    embed = neon_embed('KÉO BÚA BAO', f'{interaction.user.mention} đấu với {member.mention}')
+    embed.add_field(name='🎮 Lựa chọn của bạn', value=choice.value.upper(), inline=True)
+    embed.add_field(name='🤖 Bot chọn', value=bot_choice.upper(), inline=True)
+    embed.add_field(name='🏆 Kết quả', value=result, inline=False)
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='rank', description='Xem rank và đặc quyền giải trí')
+@app_commands.describe(member='Người muốn xem rank')
+async def rank(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    target = member or interaction.user
+    xp, _ = get_xp(target.id)
+    name, logo, threshold, perk = rank_for_xp(xp)
+    next_rank = next_rank_for_xp(xp)
+    progress = f'{xp} XP'
+    if next_rank:
+        progress += f' • còn {next_rank[2] - xp} XP để lên {next_rank[0]}'
+    embed = neon_embed(f'{logo} RANK {name.upper()}', f'{target.mention}\n\n**{progress}**')
+    embed.add_field(name='🎖️ Logo rank', value=f'{logo} **{name}**', inline=True)
+    embed.add_field(name='✨ Đặc quyền', value=perk, inline=False)
+    embed.add_field(name='🛡️ Phạm vi', value='Chỉ là đặc quyền giải trí/giao diện, không có quyền Admin hay quyền tiền tệ server.', inline=False)
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='rank_top', description='Bảng xếp hạng XP hoạt động')
+async def rank_top(interaction: discord.Interaction):
+    rows = conn.execute('SELECT user_id, xp FROM users ORDER BY xp DESC LIMIT 10').fetchall()
+    if not rows:
+        await interaction.response.send_message(embed=neon_embed('BẢNG RANK', 'Chưa có dữ liệu XP.'))
+        return
+    lines = []
+    for index, (user_id, xp) in enumerate(rows, 1):
+        user = interaction.guild.get_member(user_id) if interaction.guild else None
+        display = user.display_name if user else f'ID {user_id}'
+        rank_name, logo, _, _ = rank_for_xp(xp)
+        lines.append(f'**{index}.** {logo} {display} — `{xp} XP` ({rank_name})')
+    await interaction.response.send_message(embed=neon_embed('BẢNG XẾP HẠNG XP', '\n'.join(lines)))
+
+
+@tree.command(name='meme', description='Gửi meme nổi tiếng ngẫu nhiên')
+async def meme(interaction: discord.Interaction):
+    await interaction.response.defer()
+    template = await get_random_meme()
+    if template:
+        embed = neon_embed(f"MEME: {template['name']}", 'Meme nổi tiếng từ kho Imgflip • dùng `/meme` để đổi meme')
+        embed.set_image(url=template['url'])
+        embed.url = template['url']
+    else:
+        embed = neon_embed('MEME', 'Kho meme đang tạm thời không phản hồi. Thử lại sau nhé!')
+    await interaction.followup.send(embed=style_embed(embed))
+
+
+@tree.command(name='joke', description='Gửi một câu đùa ngẫu nhiên')
+async def joke(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=neon_embed('JOKE TIME', f'😂 {random.choice(JOKES)}'))
+
+
+@tree.command(name='quote', description='Gửi một câu nói ngẫu nhiên')
+async def quote(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=neon_embed('QUOTE OF THE DAY', f'💫 “{random.choice(QUOTES)}”'))
+
+
+@tree.command(name='fact', description='Một sự thật thú vị')
+async def fact(interaction: discord.Interaction):
+    await interaction.response.send_message(embed=neon_embed('FUN FACT', f'🧠 {random.choice(FACTS)}'))
+
+
+async def send_media_fact(interaction: discord.Interaction, kind: str):
+    api_url = f'https://api.the{kind}api.com/v1/images/search'
+    try:
+        request = urllib.request.Request(api_url, headers={'User-Agent': 'MinaBot/1.0'})
+        data = await asyncio.to_thread(lambda: json.loads(urllib.request.urlopen(request, timeout=8).read().decode('utf-8')))
+        image_url = data[0]['url']
+        embed = neon_embed(f'{kind.upper()} NEON', f'Ảnh {kind} ngẫu nhiên cho bạn ✨')
+        embed.set_image(url=image_url)
+    except Exception:
+        embed = neon_embed(f'{kind.upper()} NEON', f'Không tải được ảnh {kind} lúc này, thử lại sau nhé!')
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='cat', description='Gửi ảnh mèo ngẫu nhiên')
+async def cat(interaction: discord.Interaction):
+    await send_media_fact(interaction, 'cat')
+
+
+@tree.command(name='dog', description='Gửi ảnh chó ngẫu nhiên')
+async def dog(interaction: discord.Interaction):
+    await send_media_fact(interaction, 'dog')
 
 
 # =========================================================
