@@ -67,6 +67,26 @@ SHOP_ITEMS = {
     },
 }
 
+TAG_ITEMS = {
+    "anh_trai_mua_ha": ("🗿 Anh Trai Mưa Hạ", 75_000_000),
+    "main_character": ("✨ Main Character", 120_000_000),
+    "toang_roi": ("💀 Toang Rồi Ông Giáo Ạ", 180_000_000),
+    "dang_healing": ("🧘 Đang Healing", 250_000_000),
+    "khong_on": ("🚩 Không Ổn Nhưng Vẫn Ổn", 320_000_000),
+    "npc_neon": ("🎮 NPC Hệ Điều Hành", 450_000_000),
+    "sigma_neon": ("🗿 Sigma Hệ Neon", 700_000_000),
+    "chu_tich_online": ("💸 Chủ Tịch Online", 1_000_000_000),
+}
+
+RANK_TAGS = {
+    "Đồng": "🥉 Tân Binh Neon",
+    "Bạc": "🥈 Đại Gia Tập Sự",
+    "Vàng": "🥇 Chúa Tể Flex",
+    "Kim Cương": "💎 Hệ Điều Hành Vũ Trụ",
+    "Cao Thủ": "👑 Trùm Cuối MinaBot",
+    "Admin": "🛡️ ADMIN TỐI CAO",
+}
+
 MEME_API_URL = "https://api.imgflip.com/get_memes"
 MEME_CACHE = {"expires": 0.0, "memes": []}
 MEME_CACHE_TTL = 3600
@@ -138,6 +158,7 @@ conn = sqlite3.connect(
     'economy.db',
     check_same_thread=False
 )
+RANK_CHANGE_EVENTS = []
 
 
 def neon_color():
@@ -186,6 +207,68 @@ def next_rank_for_balance(balance: int, user_id: Optional[int] = None):
         if balance < rank[2]:
             return rank
     return None
+
+
+def get_user_tag(user_id: int, balance: Optional[int] = None) -> str:
+    if is_bot_admin(user_id):
+        return RANK_TAGS['Admin']
+    if balance is None:
+        balance, _ = get_user(user_id)
+    rank_name = rank_for_balance(balance, user_id)[0]
+    default_tag = RANK_TAGS[rank_name]
+    row = conn.execute(
+        'SELECT active_tag FROM users WHERE user_id = ?',
+        (user_id,)
+    ).fetchone()
+    active_tag = row[0] if row else None
+    if active_tag in TAG_ITEMS:
+        return TAG_ITEMS[active_tag][0]
+    return default_tag
+
+
+def purchase_tag(user_id: int, tag_key: str):
+    tag_name, price = TAG_ITEMS[tag_key]
+    now = time.time()
+    with conn:
+        row = conn.execute(
+            'SELECT balance FROM users WHERE user_id = ?',
+            (user_id,)
+        ).fetchone()
+        if row is None or row[0] < price:
+            return None
+        conn.execute(
+            'UPDATE users SET balance = balance - ?, active_tag = ? WHERE user_id = ?',
+            (price, tag_key, user_id)
+        )
+        conn.execute(
+            'INSERT OR IGNORE INTO user_tags (user_id, tag_key, purchased_at) VALUES (?, ?, ?)',
+            (user_id, tag_key, now)
+        )
+    new_balance = row[0] - price
+    old_rank = rank_for_balance(row[0], user_id)[0]
+    new_rank = rank_for_balance(new_balance, user_id)[0]
+    if old_rank != new_rank:
+        RANK_CHANGE_EVENTS.append((user_id, row[0], new_balance, old_rank, new_rank))
+    return tag_name, new_balance
+
+
+def set_active_tag(user_id: int, tag_key: str) -> bool:
+    owned = conn.execute(
+        'SELECT 1 FROM user_tags WHERE user_id = ? AND tag_key = ?',
+        (user_id, tag_key)
+    ).fetchone()
+    if not owned:
+        return False
+    conn.execute('UPDATE users SET active_tag = ? WHERE user_id = ?', (tag_key, user_id))
+    conn.commit()
+    return True
+
+
+def get_owned_tags(user_id: int):
+    return conn.execute(
+        'SELECT tag_key FROM user_tags WHERE user_id = ? ORDER BY purchased_at',
+        (user_id,)
+    ).fetchall()
 
 
 def _fetch_meme_templates():
@@ -250,6 +333,15 @@ def init_db():
             )
         ''')
 
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_tags (
+                user_id INTEGER NOT NULL,
+                tag_key TEXT NOT NULL,
+                purchased_at REAL NOT NULL,
+                PRIMARY KEY (user_id, tag_key)
+            )
+        ''')
+
         columns = {
             row[1]
             for row in conn.execute('PRAGMA table_info(users)').fetchall()
@@ -258,6 +350,8 @@ def init_db():
             conn.execute('ALTER TABLE users ADD COLUMN xp INTEGER DEFAULT 0')
         if 'last_xp' not in columns:
             conn.execute('ALTER TABLE users ADD COLUMN last_xp REAL DEFAULT 0')
+        if 'active_tag' not in columns:
+            conn.execute('ALTER TABLE users ADD COLUMN active_tag TEXT DEFAULT NULL')
 
 
 init_db()
@@ -317,6 +411,11 @@ def set_balance(
     last_daily: Optional[float] = None
 ):
     cursor = conn.cursor()
+    old_row = cursor.execute(
+        'SELECT balance FROM users WHERE user_id = ?',
+        (user_id,)
+    ).fetchone()
+    old_balance = old_row[0] if old_row else 0
     cursor.execute(
         'INSERT OR IGNORE INTO users (user_id, balance, last_daily) VALUES (?, 0, 0)',
         (user_id,)
@@ -343,6 +442,49 @@ def set_balance(
         )
 
     conn.commit()
+
+    old_rank = rank_for_balance(old_balance, user_id)[0]
+    new_rank = rank_for_balance(new_balance, user_id)[0]
+    if old_rank != new_rank:
+        RANK_CHANGE_EVENTS.append((user_id, old_balance, new_balance, old_rank, new_rank))
+
+
+async def announce_rank_changes(channel):
+    """Gửi các thông báo rank đang chờ vào đúng kênh vừa phát sinh giao dịch."""
+    if channel is None or not RANK_CHANGE_EVENTS:
+        return
+
+    events = list(RANK_CHANGE_EVENTS)
+    RANK_CHANGE_EVENTS.clear()
+    for user_id, old_balance, new_balance, old_rank, new_rank in events:
+        member = channel.guild.get_member(user_id) if getattr(channel, 'guild', None) else None
+        if member is None:
+            member = bot.get_user(user_id)
+        mention = member.mention if member else f'<@{user_id}>'
+        promoted = new_balance > old_balance
+        if promoted:
+            embed = neon_embed(
+                '🎉 CHÚC MỪNG THĂNG RANK!',
+                f'{mention} đã cán mốc mới và lên từ **{old_rank}** → **{new_rank}**!\n\n'
+                f'💰 Số dư hiện tại: **{format_money(new_balance)}**\n'
+                f'🏷️ Tag mới: **{RANK_TAGS[new_rank]}**\n\n'
+                'Hãy dùng `/rank` để xem đặc quyền vừa mở khóa!'
+            )
+            embed.color = 0xffd700 if new_rank in ('Cao Thủ', 'Admin') else 0x2ecc71
+        else:
+            embed = neon_embed(
+                '📉 TỤT RANK RỒI!',
+                f'{mention} đã rơi từ **{old_rank}** xuống **{new_rank}**.\n\n'
+                f'💰 Số dư hiện tại: **{format_money(new_balance)}**\n'
+                f'💬 Đừng buồn, cày lại là lên — `/daily` đang chờ bạn!'
+            )
+            embed.color = 0xe74c3c
+        styled = style_embed(embed)
+        styled.color = 0xffd700 if promoted and new_rank in ('Cao Thủ', 'Admin') else (0x2ecc71 if promoted else 0xe74c3c)
+        try:
+            await channel.send(embed=styled)
+        except Exception as error:
+            print(f'❌ Không gửi được thông báo đổi rank cho {user_id}: {error}')
 
 
 def get_xp(user_id: int):
@@ -446,7 +588,12 @@ def purchase_shop_item(user_id: int, item_key: str):
             ''',
             (user_id, item_key, quantity, expires_at)
         )
-    return expires_at, row[0] - item['price']
+    new_balance = row[0] - item['price']
+    old_rank = rank_for_balance(row[0], user_id)[0]
+    new_rank = rank_for_balance(new_balance, user_id)[0]
+    if old_rank != new_rank:
+        RANK_CHANGE_EVENTS.append((user_id, row[0], new_balance, old_rank, new_rank))
+    return expires_at, new_balance
 
 
 def parse_bet(
@@ -571,6 +718,7 @@ async def menu(interaction: discord.Interaction):
             '`/tx` - Cược Tài Xỉu\n'
             '`/cuop` - Cướp tiền với câu hỏi hại não (10% thắng)\n'
             '`/shop` | `/shop_buy` | `/inventory` - Shop và vật phẩm\n'
+            '`/tag_buy` | `/tags` | `/tag_set` - Tag rank và tag trendy\n'
             '`/tx_history` - Lịch sử cược Tài Xỉu\n'
             '`/rank` | `/rank_top` - Rank theo số dư và bảng xếp hạng'
         ),
@@ -659,7 +807,9 @@ async def profile(
     target = member if member is not None else interaction.user
 
     balance, _ = get_user(target.id)
-
+    rank_name, logo, _, perk = rank_for_balance(balance, target.id)
+    rank_tag = get_user_tag(target.id, balance)
+    next_rank = next_rank_for_balance(balance, target.id)
     created_at = target.created_at.strftime('%d/%m/%Y %H:%M')
 
     joined_at = (
@@ -668,29 +818,50 @@ async def profile(
         else "Không rõ"
     )
 
+    is_admin_profile = is_bot_admin(target.id)
     embed = discord.Embed(
-        title=f'👤 HỒ SƠ NGƯỜI DÙNG - {target.name}',
-        color=0x1abc9c
+        title=(f'🛡️ ADMIN PROFILE • {target.name}' if is_admin_profile
+               else f'{logo} HỒ SƠ NGƯỜI DÙNG • {target.name}'),
+        description=(
+            f'{target.mention}\n'
+            f'**{rank_tag}**\n\n'
+            f'{"👑 Hồ sơ tối cao của người điều hành MinaBot." if is_admin_profile else perk}'
+        ),
+        color=0xffd700 if is_admin_profile else 0x1abc9c
     )
-
+    embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
     embed.set_thumbnail(url=target.display_avatar.url)
+    if is_admin_profile:
+        embed.set_image(url=target.display_avatar.url)
 
     embed.add_field(
-        name='🏷️ Tên hiển thị',
-        value=target.mention,
+        name='🏷️ Danh tính',
+        value=f'**Tên:** {target.display_name}\n**Username:** `{target.name}`',
         inline=True
     )
+
+    embed.add_field(
+        name='🎖️ Rank & tag',
+        value=f'{logo} **{rank_name}**\n🏷️ {rank_tag}',
+        inline=True
+    )
+
+    embed.add_field(
+        name='💰 Số dư MinaBot',
+        value=f'**{format_money(balance)}**',
+        inline=False
+    )
+
+    if next_rank:
+        progress = f'Còn **{format_money(next_rank[2] - balance)}** để lên {next_rank[1]} **{next_rank[0]}**'
+    else:
+        progress = 'Đã đạt cấp bậc cao nhất'
+    embed.add_field(name='📈 Tiến trình', value=progress, inline=False)
 
     embed.add_field(
         name='🆔 Discord ID',
         value=f'`{target.id}`',
         inline=True
-    )
-
-    embed.add_field(
-        name='💰 Tài sản MinaBot',
-        value=f'**{format_money(balance)}**',
-        inline=False
     )
 
     embed.add_field(
@@ -705,9 +876,23 @@ async def profile(
         inline=True
     )
 
-    embed.set_footer(text=FOOTER_TEXT)
+    roles = [role.name for role in getattr(target, 'roles', []) if role.name != '@everyone']
+    embed.add_field(
+        name='🎭 Vai trò server',
+        value=', '.join(roles[-8:])[:1024] if roles else 'Chưa có vai trò riêng',
+        inline=False
+    )
 
-    await interaction.response.send_message(embed=style_embed(embed))
+    if is_admin_profile:
+        embed.set_footer(text=f'🛡️ ADMIN • {FOOTER_TEXT} • golden badge')
+    else:
+        embed.set_footer(text=f'🌈 {FOOTER_TEXT} • profile neon')
+
+    styled = style_embed(embed)
+    if is_admin_profile:
+        styled.color = 0xffd700
+        styled.set_footer(text=f'🛡️ ADMIN • {FOOTER_TEXT} • golden badge')
+    await interaction.response.send_message(embed=styled)
 
 
 @tree.command(
@@ -908,6 +1093,7 @@ class RobView(discord.ui.View):
                 f"và mất toàn bộ số tiền đang có!"
             )
 
+        await announce_rank_changes(interaction.channel)
         embed.set_footer(text=FOOTER_TEXT)
 
         await interaction.response.edit_message(
@@ -1035,6 +1221,7 @@ async def money_daily(
         new_balance,
         now
     )
+    await announce_rank_changes(interaction.channel)
 
     await interaction.response.send_message(
         f'🎁 Bạn nhận được **{format_money(reward)}**! '
@@ -1176,6 +1363,7 @@ async def money_pay(
         receiver_id,
         receiver_balance + parsed_amount
     )
+    await announce_rank_changes(interaction.channel)
 
     await interaction.response.send_message(
         f'✅ Đã chuyển **{format_money(parsed_amount)}** '
@@ -1251,6 +1439,7 @@ async def money_pay_all(
             bal + share
         )
 
+    await announce_rank_changes(interaction.channel)
     await interaction.response.send_message(
         f'🎉 {interaction.user.mention} đã phát lì xì tổng cộng '
         f'**{format_money(parsed_amount)}** '
@@ -1319,6 +1508,7 @@ async def admin_pay(
         target_user.id,
         balance + parsed_amount
     )
+    await announce_rank_changes(interaction.channel)
 
     await interaction.response.send_message(
         f'👑 **[ADMIN]** Đã cộng '
@@ -1374,6 +1564,7 @@ async def admin_take(
         member.id,
         new_balance
     )
+    await announce_rank_changes(interaction.channel)
 
     await interaction.response.send_message(
         f'👑 **[ADMIN]** Đã tịch thu '
@@ -1416,6 +1607,7 @@ async def admin_setbalance(
         member.id,
         parsed_amount
     )
+    await announce_rank_changes(interaction.channel)
 
     await interaction.response.send_message(
         f'👑 **[ADMIN]** Đã đặt số dư của '
@@ -1458,12 +1650,11 @@ async def reset_money(
     cursor = conn.cursor()
 
     if reset_all:
-
-        cursor.execute(
-            'UPDATE users SET balance = 0'
-        )
-
-        conn.commit()
+        cursor.execute('SELECT user_id FROM users WHERE balance != 0')
+        affected_users = cursor.fetchall()
+        for (user_id,) in affected_users:
+            set_balance(user_id, 0)
+        await announce_rank_changes(interaction.channel)
 
         await interaction.response.send_message(
             f'⚠️ **[ADMIN]** Đã reset số dư của '
@@ -1477,6 +1668,7 @@ async def reset_money(
             member.id,
             0
         )
+        await announce_rank_changes(interaction.channel)
 
         await interaction.response.send_message(
             f'🧹 **[ADMIN]** Đã reset số dư của '
@@ -1604,6 +1796,7 @@ async def tx(
         user_id,
         new_balance
     )
+    await announce_rank_changes(interaction.channel)
 
     cursor = conn.cursor()
 
@@ -1790,6 +1983,12 @@ async def shop(interaction: discord.Interaction):
         value='Bùa tự kích hoạt sau khi mua, áp dụng cho `/tx` và `/cuop` đến khi hết thời gian. Nếu mua cùng loại khi đang hoạt động, thời gian sẽ được cộng dồn.',
         inline=False
     )
+    tag_lines = [f'`{key}` — **{name}** · {format_money(price)}' for key, (name, price) in TAG_ITEMS.items()]
+    embed.add_field(
+        name='🏷️ TAG TRENDY VĨNH VIỄN',
+        value='Mua bằng `/tag_buy`, mua xong tự trang bị.\n' + '\n'.join(tag_lines),
+        inline=False
+    )
     await interaction.response.send_message(embed=style_embed(embed))
 
 
@@ -1821,6 +2020,7 @@ async def shop_buy(interaction: discord.Interaction, item: app_commands.Choice[s
 
     expires_at, new_balance = purchase
     remaining_minutes = max(1, int((expires_at - time.time()) / 60))
+    await announce_rank_changes(interaction.channel)
     embed = neon_embed(
         'MUA HÀNG THÀNH CÔNG',
         f'🍀 Bạn đã mua **{item_data["name"]}** với giá **{format_money(item_data["price"])}**.\n\n'
@@ -1828,6 +2028,87 @@ async def shop_buy(interaction: discord.Interaction, item: app_commands.Choice[s
         f'Số dư còn lại: **{format_money(new_balance)}**.'
     )
     await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='tag_buy', description='Mua một tag trendy vĩnh viễn trong shop')
+@app_commands.describe(tag='Tag muốn mua')
+@app_commands.choices(tag=[
+    app_commands.Choice(name='🗿 Anh Trai Mưa Hạ · 75M', value='anh_trai_mua_ha'),
+    app_commands.Choice(name='✨ Main Character · 120M', value='main_character'),
+    app_commands.Choice(name='💀 Toang Rồi Ông Giáo Ạ · 180M', value='toang_roi'),
+    app_commands.Choice(name='🧘 Đang Healing · 250M', value='dang_healing'),
+    app_commands.Choice(name='🚩 Không Ổn Nhưng Vẫn Ổn · 320M', value='khong_on'),
+    app_commands.Choice(name='🎮 NPC Hệ Điều Hành · 450M', value='npc_neon'),
+    app_commands.Choice(name='🗿 Sigma Hệ Neon · 700M', value='sigma_neon'),
+    app_commands.Choice(name='💸 Chủ Tịch Online · 1B', value='chu_tich_online'),
+])
+async def tag_buy(interaction: discord.Interaction, tag: app_commands.Choice[str]):
+    balance, _ = get_user(interaction.user.id)
+    tag_name, price = TAG_ITEMS[tag.value]
+    if balance < price:
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed(
+                'MUA TAG THẤT BẠI',
+                f'Bạn cần **{format_money(price)}** nhưng hiện có **{format_money(balance)}**.'
+            )),
+            ephemeral=True
+        )
+        return
+    purchase = purchase_tag(interaction.user.id, tag.value)
+    if purchase is None:
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed('MUA TAG THẤT BẠI', 'Số dư vừa thay đổi, hãy thử lại nhé.')),
+            ephemeral=True
+        )
+        return
+    _, new_balance = purchase
+    await announce_rank_changes(interaction.channel)
+    await interaction.response.send_message(
+        embed=style_embed(neon_embed(
+            '🏷️ MUA TAG THÀNH CÔNG',
+            f'Bạn đã mua và trang bị tag **{tag_name}** vĩnh viễn!\n\n'
+            f'Số dư còn lại: **{format_money(new_balance)}**.'
+        ))
+    )
+
+
+@tree.command(name='tags', description='Xem các tag đã mua và tag đang dùng')
+async def tags(interaction: discord.Interaction):
+    balance, _ = get_user(interaction.user.id)
+    active = get_user_tag(interaction.user.id, balance)
+    owned = get_owned_tags(interaction.user.id)
+    if owned:
+        owned_text = '\n'.join(f'• {TAG_ITEMS[key][0]}' for (key,) in owned if key in TAG_ITEMS)
+    else:
+        owned_text = 'Chưa mua tag shop nào.'
+    embed = neon_embed('🏷️ TAG CỦA BẠN', f'Tag đang dùng: **{active}**\n\n{owned_text}')
+    embed.add_field(name='💡 Đổi tag', value='Dùng `/tag_set` để chuyển sang tag đã mua.', inline=False)
+    await interaction.response.send_message(embed=style_embed(embed), ephemeral=True)
+
+
+@tree.command(name='tag_set', description='Trang bị một tag đã mua')
+@app_commands.describe(tag='Tag đã mua muốn trang bị')
+@app_commands.choices(tag=[
+    app_commands.Choice(name='🗿 Anh Trai Mưa Hạ', value='anh_trai_mua_ha'),
+    app_commands.Choice(name='✨ Main Character', value='main_character'),
+    app_commands.Choice(name='💀 Toang Rồi Ông Giáo Ạ', value='toang_roi'),
+    app_commands.Choice(name='🧘 Đang Healing', value='dang_healing'),
+    app_commands.Choice(name='🚩 Không Ổn Nhưng Vẫn Ổn', value='khong_on'),
+    app_commands.Choice(name='🎮 NPC Hệ Điều Hành', value='npc_neon'),
+    app_commands.Choice(name='🗿 Sigma Hệ Neon', value='sigma_neon'),
+    app_commands.Choice(name='💸 Chủ Tịch Online', value='chu_tich_online'),
+])
+async def tag_set(interaction: discord.Interaction, tag: app_commands.Choice[str]):
+    if not set_active_tag(interaction.user.id, tag.value):
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed('TAG CHƯA SỞ HỮU', 'Bạn chưa mua tag này. Dùng `/tag_buy` trước nhé.')),
+            ephemeral=True
+        )
+        return
+    await interaction.response.send_message(
+        embed=style_embed(neon_embed('🏷️ ĐÃ ĐỔI TAG', f'Tag hiện tại của bạn là **{TAG_ITEMS[tag.value][0]}**.')),
+        ephemeral=True
+    )
 
 
 @tree.command(name='inventory', description='Xem bùa đang sở hữu và bùa đang hoạt động')
