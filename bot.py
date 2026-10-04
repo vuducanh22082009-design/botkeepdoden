@@ -435,7 +435,8 @@ async def menu(interaction: discord.Interaction):
             '`/donate` - Ủng hộ nhà phát triển\n'
             '`/ship` | `/roast` | `/hug` | `/rps` - Tương tác vui\n'
             '`/meme` | `/joke` | `/quote` | `/fact` - Nội dung giải trí\n'
-            '`/cat` | `/dog` - Ảnh động vật ngẫu nhiên'
+            '`/cat` | `/dog` - Ảnh động vật ngẫu nhiên\n'
+            '`/fortune` - Bói vui từ rank Bạc'
         ),
         inline=False
     )
@@ -1607,6 +1608,13 @@ FACTS = [
     "Chuối là một loại quả mọng theo định nghĩa thực vật học.",
 ]
 
+FORTUNES = [
+    "Hôm nay vận may đang đứng về phía bạn. Hãy thử một điều mới! 🌟",
+    "Một người bạn sắp gửi cho bạn một tin nhắn rất vui. 💌",
+    "Bạn sẽ có một khoảnh khắc cười thật to trong hôm nay. 😄",
+    "Cơ hội tốt thường đến khi bạn chủ động bước lên trước. 🚀",
+]
+
 
 @tree.command(name='ship', description='Tính độ hợp nhau vui giữa hai người')
 @app_commands.describe(member='Người muốn ghép đôi')
@@ -1710,7 +1718,23 @@ async def quote(interaction: discord.Interaction):
 
 @tree.command(name='fact', description='Một sự thật thú vị')
 async def fact(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=neon_embed('FUN FACT', f'🧠 {random.choice(FACTS)}'))
+    await interaction.response.send_message(embed=style_embed(neon_embed('FUN FACT', f'🧠 {random.choice(FACTS)}')))
+
+
+@tree.command(name='fortune', description='Bói vui dành cho rank Bạc trở lên')
+async def fortune(interaction: discord.Interaction):
+    xp, _ = get_xp(interaction.user.id)
+    rank_name, logo, _, _ = rank_for_xp(xp)
+    if xp < RANKS[1][2]:
+        embed = neon_embed(
+            'KHÓA RANK',
+            f'🔒 Lệnh `/fortune` mở từ rank **Bạc**.\n\n'
+            f'Bạn đang ở {logo} **{rank_name}** với **{xp} XP**. '
+            f'Cần thêm **{RANKS[1][2] - xp} XP** để mở khóa!'
+        )
+    else:
+        embed = neon_embed('BÓI VUI NEON', f'🔮 {random.choice(FORTUNES)}\n\nRank hiện tại: {logo} **{rank_name}**')
+    await interaction.response.send_message(embed=style_embed(embed), ephemeral=True)
 
 
 async def send_media_fact(interaction: discord.Interaction, kind: str):
