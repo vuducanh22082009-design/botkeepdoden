@@ -30,11 +30,18 @@ NEON_COLORS = [
 
 RANKS = [
     ("Đồng", "🥉", 0, "Huy hiệu Đồng và giao diện neon cơ bản"),
-    ("Bạc", "🥈", 100, "Được mở khóa lệnh bói vui và khung hồ sơ Bạc"),
-    ("Vàng", "🥇", 500, "Được dùng danh hiệu Vàng trong các lệnh tương tác"),
-    ("Kim Cương", "💎", 1500, "Huy hiệu Kim Cương và hiệu ứng neon đặc biệt"),
-    ("Cao Thủ", "👑", 5000, "Huy hiệu Cao Thủ và danh hiệu tối thượng"),
+    ("Bạc", "🥈", 100_000_000, "Mở khóa `/fortune` và khung hồ sơ Bạc"),
+    ("Vàng", "🥇", 500_000_000, "Mở khóa `/love_fortune`, mini game bói tình duyên"),
+    ("Kim Cương", "💎", 1_500_000_000, "Mở khóa `/tarot`, trải bài Tarot 3 lá"),
+    ("Cao Thủ", "👑", 5_000_000_000, "Mở khóa `/master_mode`, Cổng Cao Thủ độc quyền"),
 ]
+
+ADMIN_RANK = (
+    "Admin",
+    "🛡️",
+    0,
+    "Toàn quyền quản trị MinaBot, nhãn Admin và hiệu ứng huy hiệu riêng",
+)
 
 SHOP_ITEMS = {
     "bua_x2_15p": {
@@ -157,17 +164,26 @@ def style_embed(embed: discord.Embed):
     return embed
 
 
-def rank_for_xp(xp: int):
+def is_bot_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
+
+def rank_for_balance(balance: int, user_id: Optional[int] = None):
+    if user_id is not None and is_bot_admin(user_id):
+        return ADMIN_RANK
+
     current = RANKS[0]
     for rank in RANKS:
-        if xp >= rank[2]:
+        if balance >= rank[2]:
             current = rank
     return current
 
 
-def next_rank_for_xp(xp: int):
+def next_rank_for_balance(balance: int, user_id: Optional[int] = None):
+    if user_id is not None and is_bot_admin(user_id):
+        return None
     for rank in RANKS:
-        if xp < rank[2]:
+        if balance < rank[2]:
             return rank
     return None
 
@@ -516,17 +532,6 @@ async def on_ready():
         guild_commands_synced = bool(bot.guilds) and all_guilds_synced
 
 
-@bot.event
-async def on_message(message: discord.Message):
-    """Cộng XP tối đa một lần mỗi phút để khuyến khích trò chuyện, chống spam."""
-    if message.author.bot or message.guild is None:
-        return
-
-    _, last_xp = get_xp(message.author.id)
-    if time.time() - last_xp >= 60:
-        add_xp(message.author.id, random.randint(5, 12))
-
-
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Không để lệnh lỗi im lặng; báo lỗi thân thiện và ghi log để sửa nhanh."""
@@ -567,7 +572,7 @@ async def menu(interaction: discord.Interaction):
             '`/cuop` - Cướp tiền với câu hỏi hại não (10% thắng)\n'
             '`/shop` | `/shop_buy` | `/inventory` - Shop và vật phẩm\n'
             '`/tx_history` - Lịch sử cược Tài Xỉu\n'
-            '`/rank` | `/rank_top` - XP và bảng rank'
+            '`/rank` | `/rank_top` - Rank theo số dư và bảng xếp hạng'
         ),
         inline=False
     )
@@ -582,7 +587,10 @@ async def menu(interaction: discord.Interaction):
             '`/ship` | `/roast` | `/hug` | `/rps` - Tương tác vui\n'
             '`/meme` | `/joke` | `/quote` | `/fact` - Nội dung giải trí\n'
             '`/cat` | `/dog` - Ảnh động vật ngẫu nhiên\n'
-            '`/fortune` - Bói vui từ rank Bạc'
+            '`/fortune` - Bói vui từ rank Bạc\n'
+            '`/love_fortune` - Bói tình duyên từ rank Vàng\n'
+            '`/tarot` - Tarot 3 lá từ rank Kim Cương\n'
+            '`/master_mode` - Cổng Cao Thủ từ rank Cao Thủ'
         ),
         inline=False
     )
@@ -1853,7 +1861,7 @@ async def inventory(interaction: discord.Interaction):
 
 
 # =========================================================
-# TƯƠNG TÁC, XP/RANK VÀ NỘI DUNG GIẢI TRÍ
+# TƯƠNG TÁC, RANK VÀ NỘI DUNG GIẢI TRÍ
 # =========================================================
 
 ROASTS = [
@@ -1889,6 +1897,48 @@ FORTUNES = [
     "Một người bạn sắp gửi cho bạn một tin nhắn rất vui. 💌",
     "Bạn sẽ có một khoảnh khắc cười thật to trong hôm nay. 😄",
     "Cơ hội tốt thường đến khi bạn chủ động bước lên trước. 🚀",
+]
+
+LOVE_FORTUNES = [
+    ("💚 Tín hiệu xanh", "Có người đang để ý bạn nhưng còn chờ một dấu hiệu an toàn.", "Chủ động bắt chuyện bằng một câu hỏi đơn giản."),
+    ("💌 Lá thư chưa gửi", "Cảm xúc đang bị giữ trong lòng; một lời nói thật có thể mở khóa câu chuyện.", "Đừng đoán ý quá lâu, hãy giao tiếp rõ ràng và tử tế."),
+    ("🔥 Ngọn lửa bất ngờ", "Một cuộc gặp hoặc tin nhắn bất ngờ có thể làm nhịp tim tăng tốc.", "Giữ sự tự nhiên, đừng vội hứa điều quá lớn."),
+    ("🌙 Khoảng lặng dịu dàng", "Mối duyên này cần thêm thời gian để hiểu nhau, chưa phải dấu chấm hết.", "Tôn trọng không gian của nhau nhưng đừng biến mất hoàn toàn."),
+    ("🌹 Hoa hồng hai chiều", "Năng lượng tình cảm đang cân bằng; khả năng cao đối phương cũng quan tâm.", "Một lời rủ đi chơi nhẹ nhàng sẽ là nước đi đẹp."),
+]
+
+# Ý nghĩa ngắn gọn được tổng hợp theo hệ Major Arcana phổ biến.
+# Trải bài sử dụng 3 vị trí: hiện tại - trở ngại - lời khuyên.
+TAROT_CARDS = [
+    ("The Fool", "Kẻ Khờ", "Khởi đầu, niềm tin, bước vào điều mới", "Bốc đồng, thiếu chuẩn bị, sợ cam kết"),
+    ("The Magician", "Nhà Ảo Thuật", "Chủ động, sáng tạo, biến ý định thành hành động", "Thao túng, năng lượng phân tán, nói nhiều làm ít"),
+    ("The High Priestess", "Nữ Tư Tế", "Trực giác, bí mật, lắng nghe nội tâm", "Bỏ qua trực giác, điều chưa được nói ra"),
+    ("The Empress", "Nữ Hoàng", "Nuôi dưỡng, tình yêu, sự phát triển", "Chiều chuộng quá mức, phụ thuộc, trì trệ"),
+    ("The Emperor", "Hoàng Đế", "Cấu trúc, trách nhiệm, lãnh đạo", "Kiểm soát, cứng nhắc, áp đặt"),
+    ("The Hierophant", "Giáo Hoàng", "Giá trị chung, truyền thống, người hướng dẫn", "Khuôn mẫu, giáo điều, sợ khác biệt"),
+    ("The Lovers", "Tình Nhân", "Kết nối, lựa chọn bằng trái tim, hòa hợp", "Do dự, lệch giá trị, lựa chọn thiếu rõ ràng"),
+    ("The Chariot", "Cỗ Xe", "Ý chí, tiến lên, làm chủ hướng đi", "Mất phương hướng, nóng vội, thiếu cân bằng"),
+    ("Strength", "Sức Mạnh", "Kiên nhẫn, lòng can đảm, dịu dàng có sức mạnh", "Tự nghi ngờ, phản ứng quá mạnh, kiệt sức"),
+    ("The Hermit", "Ẩn Sĩ", "Chiêm nghiệm, tìm câu trả lời bên trong", "Cô lập, né tránh, suy nghĩ quá nhiều"),
+    ("Wheel of Fortune", "Bánh Xe Số Phận", "Bước ngoặt, chu kỳ mới, cơ hội", "Chống lại thay đổi, cảm giác mất kiểm soát"),
+    ("Justice", "Công Lý", "Sự thật, cân bằng, quyết định công bằng", "Thiên vị, né trách nhiệm, hậu quả chưa nhìn nhận"),
+    ("The Hanged Man", "Người Treo", "Tạm dừng, đổi góc nhìn, buông bỏ", "Trì hoãn, mắc kẹt, hy sinh vô ích"),
+    ("Death", "Cái Chết", "Kết thúc cần thiết, chuyển hóa, tái sinh", "Bám víu, sợ thay đổi, kéo dài điều đã hết"),
+    ("Temperance", "Tiết Chế", "Hài hòa, chữa lành, đi từng bước", "Quá đà, thiếu kiên nhẫn, năng lượng lệch"),
+    ("The Devil", "Ác Quỷ", "Ham muốn, ràng buộc, đối diện mặt bóng tối", "Thoát khỏi phụ thuộc, lấy lại quyền lựa chọn"),
+    ("The Tower", "Tòa Tháp", "Sự thật phá vỡ ảo tưởng, giải phóng", "Kháng cự thay đổi, khủng hoảng bị trì hoãn"),
+    ("The Star", "Ngôi Sao", "Hy vọng, cảm hứng, niềm tin được chữa lành", "Mất niềm tin, thiếu động lực, kỳ vọng quá xa"),
+    ("The Moon", "Mặt Trăng", "Cảm xúc sâu, trực giác, điều chưa rõ", "Lo âu, hiểu lầm, nỗi sợ phóng đại"),
+    ("The Sun", "Mặt Trời", "Niềm vui, rõ ràng, thành công, sức sống", "Niềm vui bị che khuất, cái tôi, quá tự tin"),
+    ("Judgement", "Phán Xét", "Thức tỉnh, tha thứ, cơ hội làm lại", "Tự phán xét, mắc kẹt trong quá khứ, bỏ lỡ tiếng gọi"),
+    ("The World", "Thế Giới", "Hoàn thành, trưởng thành, một chu kỳ trọn vẹn", "Chưa khép lại, thiếu bước cuối, vòng lặp dang dở"),
+]
+
+MASTER_TRIALS = [
+    ("🧠 Mắt Bão", "Giữ bình tĩnh trước một chuyện đang làm bạn nóng ruột.", "Câu thần chú: chậm lại một nhịp để nhìn xa hơn."),
+    ("⚡ Nước Đi Vô Hình", "Hôm nay hãy giúp một người mà không cần nói mình đã làm.", "Cao thủ thật sự không cần phải luôn được nhìn thấy."),
+    ("👑 Phá Kén", "Thử một điều bạn thường né tránh trong 10 phút.", "Một bước nhỏ nhưng tự chọn sẽ mở khóa phiên bản mạnh hơn của bạn."),
+    ("🌌 Bản Đồ Sao", "Viết ra một mục tiêu và một hành động có thể làm ngay tối nay.", "Biến ý tưởng thành hành động là đặc quyền của người làm chủ cuộc chơi."),
 ]
 
 
@@ -1938,36 +1988,45 @@ async def rps(interaction: discord.Interaction, member: discord.Member, choice: 
     await interaction.response.send_message(embed=style_embed(embed))
 
 
-@tree.command(name='rank', description='Xem rank và đặc quyền giải trí')
+@tree.command(name='rank', description='Xem rank và đặc quyền theo số dư')
 @app_commands.describe(member='Người muốn xem rank')
 async def rank(interaction: discord.Interaction, member: Optional[discord.Member] = None):
     target = member or interaction.user
-    xp, _ = get_xp(target.id)
-    name, logo, threshold, perk = rank_for_xp(xp)
-    next_rank = next_rank_for_xp(xp)
-    progress = f'{xp} XP'
+    balance, _ = get_user(target.id)
+    name, logo, threshold, perk = rank_for_balance(balance, target.id)
+    next_rank = next_rank_for_balance(balance, target.id)
+    progress = f'{format_money(balance)}'
     if next_rank:
-        progress += f' • còn {next_rank[2] - xp} XP để lên {next_rank[0]}'
-    embed = neon_embed(f'{logo} RANK {name.upper()}', f'{target.mention}\n\n**{progress}**')
-    embed.add_field(name='🎖️ Logo rank', value=f'{logo} **{name}**', inline=True)
+        progress += f' • còn {format_money(next_rank[2] - balance)} để lên {next_rank[0]}'
+    tag = ' `[ADMIN]`' if name == ADMIN_RANK[0] else ''
+    embed = neon_embed(f'{logo} RANK {name.upper()}{tag}', f'{target.mention}\n\n**Số dư: {progress}**')
+    embed.add_field(name='🎖️ Huy hiệu', value=f'{logo} **{name}**', inline=True)
     embed.add_field(name='✨ Đặc quyền', value=perk, inline=False)
-    embed.add_field(name='🛡️ Phạm vi', value='Chỉ là đặc quyền giải trí/giao diện, không có quyền Admin hay quyền tiền tệ server.', inline=False)
-    await interaction.response.send_message(embed=style_embed(embed))
+    if name == ADMIN_RANK[0]:
+        scope = 'Toàn quyền Admin MinaBot, bao gồm quản trị lệnh và economy.'
+    else:
+        scope = 'Chỉ là đặc quyền giải trí/giao diện; không có quyền Admin hoặc quyền tiền tệ server.'
+    embed.add_field(name='🛡️ Phạm vi', value=scope, inline=False)
+    styled = style_embed(embed)
+    if name == ADMIN_RANK[0]:
+        styled.color = 0xffd700
+        styled.set_footer(text=f'🛡️ ADMIN • {FOOTER_TEXT} • golden badge')
+    await interaction.response.send_message(embed=styled)
 
 
-@tree.command(name='rank_top', description='Bảng xếp hạng XP hoạt động')
+@tree.command(name='rank_top', description='Bảng xếp hạng theo số dư')
 async def rank_top(interaction: discord.Interaction):
-    rows = conn.execute('SELECT user_id, xp FROM users ORDER BY xp DESC LIMIT 10').fetchall()
+    rows = conn.execute('SELECT user_id, balance FROM users ORDER BY balance DESC LIMIT 10').fetchall()
     if not rows:
-        await interaction.response.send_message(embed=neon_embed('BẢNG RANK', 'Chưa có dữ liệu XP.'))
+        await interaction.response.send_message(embed=neon_embed('BẢNG RANK', 'Chưa có dữ liệu số dư.'))
         return
     lines = []
-    for index, (user_id, xp) in enumerate(rows, 1):
+    for index, (user_id, balance) in enumerate(rows, 1):
         user = interaction.guild.get_member(user_id) if interaction.guild else None
         display = user.display_name if user else f'ID {user_id}'
-        rank_name, logo, _, _ = rank_for_xp(xp)
-        lines.append(f'**{index}.** {logo} {display} — `{xp} XP` ({rank_name})')
-    await interaction.response.send_message(embed=neon_embed('BẢNG XẾP HẠNG XP', '\n'.join(lines)))
+        rank_name, logo, _, _ = rank_for_balance(balance, user_id)
+        lines.append(f'**{index}.** {logo} {display} — `{format_money(balance)}` ({rank_name})')
+    await interaction.response.send_message(embed=neon_embed('BẢNG XẾP HẠNG SỐ DƯ', '\n'.join(lines)))
 
 
 @tree.command(name='meme', description='Gửi meme nổi tiếng ngẫu nhiên')
@@ -2000,18 +2059,110 @@ async def fact(interaction: discord.Interaction):
 
 @tree.command(name='fortune', description='Bói vui dành cho rank Bạc trở lên')
 async def fortune(interaction: discord.Interaction):
-    xp, _ = get_xp(interaction.user.id)
-    rank_name, logo, _, _ = rank_for_xp(xp)
-    if xp < RANKS[1][2]:
+    balance, _ = get_user(interaction.user.id)
+    rank_name, logo, _, _ = rank_for_balance(balance, interaction.user.id)
+    if not is_bot_admin(interaction.user.id) and balance < RANKS[1][2]:
         embed = neon_embed(
             'KHÓA RANK',
             f'🔒 Lệnh `/fortune` mở từ rank **Bạc**.\n\n'
-            f'Bạn đang ở {logo} **{rank_name}** với **{xp} XP**. '
-            f'Cần thêm **{RANKS[1][2] - xp} XP** để mở khóa!'
+            f'Bạn đang ở {logo} **{rank_name}** với **{format_money(balance)}**. '
+            f'Cần thêm **{format_money(RANKS[1][2] - balance)}** để mở khóa!'
         )
     else:
         embed = neon_embed('BÓI VUI NEON', f'🔮 {random.choice(FORTUNES)}\n\nRank hiện tại: {logo} **{rank_name}**')
     await interaction.response.send_message(embed=style_embed(embed), ephemeral=True)
+
+
+@tree.command(name='love_fortune', description='Mini game bói tình duyên dành cho rank Vàng')
+@app_commands.describe(topic='Chủ đề bạn muốn hỏi')
+@app_commands.choices(topic=[
+    app_commands.Choice(name='Người ấy có để ý mình không?', value='attention'),
+    app_commands.Choice(name='Mối quan hệ sắp tới thế nào?', value='future'),
+    app_commands.Choice(name='Mình có nên chủ động không?', value='action'),
+])
+async def love_fortune(interaction: discord.Interaction, topic: app_commands.Choice[str]):
+    balance, _ = get_user(interaction.user.id)
+    rank_name, logo, _, _ = rank_for_balance(balance, interaction.user.id)
+    if not is_bot_admin(interaction.user.id) and balance < RANKS[2][2]:
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed(
+                'KHÓA RANK VÀNG',
+                f'🔒 `/love_fortune` mở từ rank **Vàng** (500M).\n\n'
+                f'Bạn đang có **{format_money(balance)}**, cần thêm **{format_money(RANKS[2][2] - balance)}**.'
+            )),
+            ephemeral=True
+        )
+        return
+
+    title, reading, advice = random.choice(LOVE_FORTUNES)
+    score = random.randint(55, 98)
+    embed = neon_embed('💘 BÓI TÌNH DUYÊN', f'{interaction.user.mention}\nChủ đề: **{topic.name}**')
+    embed.add_field(name='🃏 Lá bài vui', value=f'**{title}**\n{reading}', inline=False)
+    embed.add_field(name='💞 Điểm duyên', value=f'**{score}%**', inline=True)
+    embed.add_field(name='🌹 Lời khuyên', value=advice, inline=False)
+    embed.set_footer(text=f'🌈 {FOOTER_TEXT} • trò chơi giải trí • {logo} {rank_name}')
+    await interaction.response.send_message(embed=style_embed(embed), ephemeral=True)
+
+
+@tree.command(name='tarot', description='Trải Tarot 3 lá dành cho rank Kim Cương')
+@app_commands.describe(question='Câu hỏi bạn muốn soi chiếu')
+async def tarot(interaction: discord.Interaction, question: Optional[str] = 'Tình yêu và hướng đi sắp tới'):
+    balance, _ = get_user(interaction.user.id)
+    rank_name, logo, _, _ = rank_for_balance(balance, interaction.user.id)
+    if not is_bot_admin(interaction.user.id) and balance < RANKS[3][2]:
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed(
+                'KHÓA RANK KIM CƯƠNG',
+                f'🔒 `/tarot` mở từ rank **Kim Cương** (1,5B).\n\n'
+                f'Bạn đang có **{format_money(balance)}**, cần thêm **{format_money(RANKS[3][2] - balance)}**.'
+            )),
+            ephemeral=True
+        )
+        return
+
+    positions = ('🔮 Hiện tại', '🧱 Trở ngại', '🌟 Lời khuyên')
+    drawn = random.sample(TAROT_CARDS, 3)
+    embed = neon_embed('💎 TAROT 3 LÁ', f'Câu hỏi: **{question[:200]}**\n\n'
+                       'Trải bài tham khảo theo cấu trúc hiện tại – trở ngại – lời khuyên.')
+    for position, card in zip(positions, drawn):
+        reversed_card = random.choice((False, False, True))
+        meaning = card[3] if reversed_card else card[2]
+        direction = '🔻 Ngược' if reversed_card else '🔺 Xuôi'
+        embed.add_field(
+            name=f'{position} · {card[1]} ({direction})',
+            value=f'**{card[0]}**\n{meaning}',
+            inline=False
+        )
+    embed.add_field(
+        name='📚 Cách đọc',
+        value='Tarot là công cụ tự soi chiếu và giải trí, không phải lời tiên tri chắc chắn. Hãy dùng thông điệp như một góc nhìn để tự quyết định.',
+        inline=False
+    )
+    embed.set_footer(text=f'🌈 {FOOTER_TEXT} • {logo} {rank_name}')
+    await interaction.response.send_message(embed=style_embed(embed), ephemeral=True)
+
+
+@tree.command(name='master_mode', description='Cổng Cao Thủ độc quyền dành cho rank Cao Thủ')
+async def master_mode(interaction: discord.Interaction):
+    balance, _ = get_user(interaction.user.id)
+    rank_name, logo, _, _ = rank_for_balance(balance, interaction.user.id)
+    if not is_bot_admin(interaction.user.id) and balance < RANKS[4][2]:
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed(
+                'CỔNG CAO THỦ ĐANG KHÓA',
+                f'🔒 Cần rank **Cao Thủ** (5B). Bạn còn thiếu **{format_money(RANKS[4][2] - balance)}**.'
+            )),
+            ephemeral=True
+        )
+        return
+
+    title, mission, mantra = random.choice(MASTER_TRIALS)
+    embed = neon_embed('👑 CỔNG CAO THỦ', f'{interaction.user.mention}\n\n**{title}**')
+    embed.add_field(name='🎯 Thử thách hôm nay', value=mission, inline=False)
+    embed.add_field(name='⚡ Mật lệnh', value=mantra, inline=False)
+    embed.add_field(name='🛡️ Huy hiệu', value='Bạn đã mở khóa Aura Cao Thủ — hiệu ứng tối thượng của MinaBot.', inline=False)
+    embed.set_footer(text=f'🌈 {FOOTER_TEXT} • {logo} {rank_name}')
+    await interaction.response.send_message(embed=style_embed(embed))
 
 
 async def send_media_fact(interaction: discord.Interaction, kind: str):
