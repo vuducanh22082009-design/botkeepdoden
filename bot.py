@@ -36,6 +36,30 @@ RANKS = [
     ("Cao Thủ", "👑", 5000, "Huy hiệu Cao Thủ và danh hiệu tối thượng"),
 ]
 
+SHOP_ITEMS = {
+    "bua_x2_15p": {
+        "name": "Bùa May Mắn x2 · 15 phút",
+        "price": 50_000_000,
+        "duration": 15 * 60,
+        "multiplier": 2,
+        "description": "Nhân đôi tỷ lệ thắng trong Tài Xỉu và Cướp tiền.",
+    },
+    "bua_x2_1h": {
+        "name": "Bùa May Mắn x2 · 1 giờ",
+        "price": 200_000_000,
+        "duration": 60 * 60,
+        "multiplier": 2,
+        "description": "Nhân đôi tỷ lệ thắng trong Tài Xỉu và Cướp tiền.",
+    },
+    "bua_x3_30p": {
+        "name": "Bùa May Mắn x3 · 30 phút",
+        "price": 500_000_000,
+        "duration": 30 * 60,
+        "multiplier": 3,
+        "description": "Nhân ba tỷ lệ thắng trong Tài Xỉu và Cướp tiền.",
+    },
+}
+
 MEME_API_URL = "https://api.imgflip.com/get_memes"
 MEME_CACHE = {"expires": 0.0, "memes": []}
 MEME_CACHE_TTL = 3600
@@ -199,6 +223,16 @@ def init_db():
             )
         ''')
 
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS inventory (
+                user_id INTEGER NOT NULL,
+                item_key TEXT NOT NULL,
+                quantity INTEGER DEFAULT 0,
+                expires_at REAL DEFAULT 0,
+                PRIMARY KEY (user_id, item_key)
+            )
+        ''')
+
         columns = {
             row[1]
             for row in conn.execute('PRAGMA table_info(users)').fetchall()
@@ -314,6 +348,46 @@ def add_xp(user_id: int, amount: int = 5):
     return new_xp
 
 
+def get_luck_multiplier(user_id: int):
+    now = time.time()
+    rows = conn.execute(
+        '''
+        SELECT item_key, quantity, expires_at
+        FROM inventory
+        WHERE user_id = ? AND quantity > 0 AND expires_at > ?
+        ''',
+        (user_id, now)
+    ).fetchall()
+    if not rows:
+        return 1, 0
+    best_item = max(rows, key=lambda row: SHOP_ITEMS.get(row[0], {}).get('multiplier', 1))
+    return SHOP_ITEMS[best_item[0]]['multiplier'], best_item[2]
+
+
+def add_shop_item(user_id: int, item_key: str):
+    item = SHOP_ITEMS[item_key]
+    now = time.time()
+    current = conn.execute(
+        'SELECT quantity, expires_at FROM inventory WHERE user_id = ? AND item_key = ?',
+        (user_id, item_key)
+    ).fetchone()
+    start_at = max(now, current[1]) if current else now
+    expires_at = start_at + item['duration']
+    quantity = current[0] + 1 if current and current[1] > now else 1
+    conn.execute(
+        '''
+        INSERT INTO inventory (user_id, item_key, quantity, expires_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id, item_key) DO UPDATE SET
+            quantity = excluded.quantity,
+            expires_at = excluded.expires_at
+        ''',
+        (user_id, item_key, quantity, expires_at)
+    )
+    conn.commit()
+    return expires_at
+
+
 def parse_bet(
     balance: int,
     amount_str: str
@@ -395,6 +469,19 @@ async def on_message(message: discord.Message):
         add_xp(message.author.id, random.randint(5, 12))
 
 
+@tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Không để lệnh lỗi im lặng; báo lỗi thân thiện và ghi log để sửa nhanh."""
+    print(f'❌ Lỗi slash command: {type(error).__name__}: {error}')
+    message = 'Lệnh chưa chạy được. Hãy thử lại sau giây lát nhé!'
+    if isinstance(error, app_commands.CommandInvokeError):
+        message = 'Lệnh gặp lỗi khi xử lý. Mình đã ghi log để kiểm tra.'
+    if interaction.response.is_done():
+        await interaction.followup.send(message, ephemeral=True)
+    else:
+        await interaction.response.send_message(message, ephemeral=True)
+
+
 # =========================================================
 # LỆNH MENU
 # =========================================================
@@ -420,6 +507,7 @@ async def menu(interaction: discord.Interaction):
             '`/money pay_all` - Phát lì xì toàn server\n'
             '`/tx` - Cược Tài Xỉu\n'
             '`/cuop` - Cướp tiền với câu hỏi hại não (10% thắng)\n'
+            '`/shop` | `/shop_buy` | `/inventory` - Shop và vật phẩm\n'
             '`/tx_history` - Lịch sử cược Tài Xỉu\n'
             '`/rank` | `/rank_top` - XP và bảng rank'
         ),
@@ -702,8 +790,9 @@ class RobView(discord.ui.View):
         for item in self.children:
             item.disabled = True
 
-        # Tỷ lệ 10% thành công
-        success = random.random() < 0.10
+        # Tỷ lệ cơ bản 10%, bùa x2/x3 nhân tỷ lệ và không vượt quá 100%.
+        luck_multiplier, _ = get_luck_multiplier(self.robber_id)
+        success = random.random() < min(1.0, 0.10 * luck_multiplier)
 
         if success:
 
@@ -730,7 +819,8 @@ class RobView(discord.ui.View):
             embed.description = (
                 f"🎉 {interaction.user.mention} đã cướp thành công "
                 f"**{format_money(stolen)}** từ "
-                f"{self.victim.mention}!"
+                f"{self.victim.mention}!\n\n"
+                f"🍀 Bùa may mắn: **x{luck_multiplier}**"
             )
 
         else:
@@ -1391,20 +1481,20 @@ async def tx(
         )
         return
 
-    dice = [
-        random.randint(1, 6)
-        for _ in range(3)
-    ]
+    luck_multiplier, _ = get_luck_multiplier(user_id)
+    win = False
+    dice = []
+    result = 'xỉu'
+    total = 0
 
-    total = sum(dice)
-
-    result = (
-        'tài'
-        if 11 <= total <= 18
-        else 'xỉu'
-    )
-
-    win = choice == result
+    # Mỗi hệ số cho thêm một lượt gieo; kết quả cuối vẫn là xúc xắc thật.
+    for _ in range(luck_multiplier):
+        dice = [random.randint(1, 6) for _ in range(3)]
+        total = sum(dice)
+        result = 'tài' if 11 <= total <= 18 else 'xỉu'
+        win = choice == result
+        if win:
+            break
 
     dice_str = ', '.join(
         map(str, dice)
@@ -1490,6 +1580,13 @@ async def tx(
         value=format_money(new_balance),
         inline=False
     )
+
+    if luck_multiplier > 1:
+        embed.add_field(
+            name='🍀 Bùa may mắn',
+            value=f'Đang hoạt động: **x{luck_multiplier}**',
+            inline=False
+        )
 
     embed.set_footer(
         text=FOOTER_TEXT
@@ -1577,6 +1674,92 @@ async def tx_history(
 
 
 # =========================================================
+# SHOP VẬT PHẨM
+# =========================================================
+
+@tree.command(name='shop', description='Xem cửa hàng vật phẩm MinaBot')
+async def shop(interaction: discord.Interaction):
+    lines = []
+    for key, item in SHOP_ITEMS.items():
+        lines.append(
+            f'`{key}`\n'
+            f'**{item["name"]}** — **{format_money(item["price"])}**\n'
+            f'{item["description"]}'
+        )
+    embed = neon_embed(
+        'SHOP VẬT PHẨM',
+        'Dùng `/shop_buy` và chọn vật phẩm để mua. Giá được đặt rất cao để bùa là vật phẩm hiếm.\n\n'
+        + '\n\n'.join(lines)
+    )
+    embed.add_field(
+        name='🍀 Cách hoạt động',
+        value='Bùa tự kích hoạt sau khi mua, áp dụng cho `/tx` và `/cuop` đến khi hết thời gian. Nếu mua cùng loại khi đang hoạt động, thời gian sẽ được cộng dồn.',
+        inline=False
+    )
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='shop_buy', description='Mua một vật phẩm trong shop')
+@app_commands.describe(item='Vật phẩm muốn mua')
+@app_commands.choices(item=[
+    app_commands.Choice(name='Bùa x2 · 15 phút · 50M', value='bua_x2_15p'),
+    app_commands.Choice(name='Bùa x2 · 1 giờ · 200M', value='bua_x2_1h'),
+    app_commands.Choice(name='Bùa x3 · 30 phút · 500M', value='bua_x3_30p'),
+])
+async def shop_buy(interaction: discord.Interaction, item: app_commands.Choice[str]):
+    item_data = SHOP_ITEMS[item.value]
+    balance, _ = get_user(interaction.user.id)
+    if balance < item_data['price']:
+        embed = neon_embed(
+            'MUA HÀNG THẤT BẠI',
+            f'Bạn cần **{format_money(item_data["price"])}** nhưng hiện chỉ có **{format_money(balance)}**.'
+        )
+        await interaction.response.send_message(embed=style_embed(embed), ephemeral=True)
+        return
+
+    set_balance(interaction.user.id, balance - item_data['price'])
+    expires_at = add_shop_item(interaction.user.id, item.value)
+    remaining_minutes = max(1, int((expires_at - time.time()) / 60))
+    embed = neon_embed(
+        'MUA HÀNG THÀNH CÔNG',
+        f'🍀 Bạn đã mua **{item_data["name"]}** với giá **{format_money(item_data["price"])}**.\n\n'
+        f'Bùa đã tự kích hoạt, còn khoảng **{remaining_minutes} phút**.\n'
+        f'Số dư còn lại: **{format_money(balance - item_data["price"])}**.'
+    )
+    await interaction.response.send_message(embed=style_embed(embed))
+
+
+@tree.command(name='inventory', description='Xem bùa đang sở hữu và bùa đang hoạt động')
+async def inventory(interaction: discord.Interaction):
+    rows = conn.execute(
+        'SELECT item_key, quantity, expires_at FROM inventory WHERE user_id = ? AND quantity > 0',
+        (interaction.user.id,)
+    ).fetchall()
+    if not rows:
+        await interaction.response.send_message(
+            embed=style_embed(neon_embed('TÚI ĐỒ TRỐNG', 'Bạn chưa sở hữu bùa nào. Dùng `/shop` để xem vật phẩm.')),
+            ephemeral=True
+        )
+        return
+
+    now = time.time()
+    lines = []
+    for item_key, quantity, expires_at in rows:
+        item_data = SHOP_ITEMS.get(item_key)
+        if not item_data:
+            continue
+        if expires_at > now:
+            status = f'đang hoạt động, còn **{max(1, int((expires_at - now) / 60))} phút**'
+        else:
+            status = 'đã hết hạn'
+        lines.append(f'🍀 **{item_data["name"]}** ×{quantity} — {status}')
+    await interaction.response.send_message(
+        embed=style_embed(neon_embed('TÚI ĐỒ CỦA BẠN', '\n'.join(lines))),
+        ephemeral=True
+    )
+
+
+# =========================================================
 # TƯƠNG TÁC, XP/RANK VÀ NỘI DUNG GIẢI TRÍ
 # =========================================================
 
@@ -1618,8 +1801,9 @@ FORTUNES = [
 
 @tree.command(name='ship', description='Tính độ hợp nhau vui giữa hai người')
 @app_commands.describe(member='Người muốn ghép đôi')
-async def ship(interaction: discord.Interaction, member: discord.Member):
-    score = random.randint(1, 100)
+async def ship(interaction: discord.Interaction, member: Optional[discord.Member] = None):
+    member = member or interaction.user
+    score = 100 if member.id == interaction.user.id else random.randint(1, 100)
     mood = 'định mệnh rồi đó 💞' if score >= 80 else 'có tiềm năng, cứ nói chuyện thêm nhé ✨' if score >= 50 else 'bạn bè cũng là một loại duyên mà 😄'
     embed = neon_embed('SHIP METER', f'{interaction.user.mention} 💘 {member.mention}')
     embed.add_field(name='💖 Độ hợp nhau', value=f'**{score}%**', inline=False)
