@@ -585,16 +585,10 @@ class RobView(discord.ui.View):
 
         else:
 
-            penalty = 10000
-
-            new_robber_bal = max(
-                0,
-                robber_bal - penalty
-            )
-
+            # Cướp thất bại sẽ mất toàn bộ số dư hiện có.
             set_balance(
                 self.robber_id,
-                new_robber_bal
+                0
             )
 
             embed = discord.Embed(
@@ -605,7 +599,7 @@ class RobView(discord.ui.View):
             embed.description = (
                 f"🚨 **ban la 1 thang gayyyy**\n\n"
                 f"{interaction.user.mention} cướp thất bại "
-                f"và bị phạt **{format_money(penalty)}**!"
+                f"và mất toàn bộ số tiền đang có!"
             )
 
         embed.set_footer(text=FOOTER_TEXT)
