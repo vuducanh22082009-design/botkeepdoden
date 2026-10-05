@@ -1037,6 +1037,17 @@ class RobView(discord.ui.View):
             )
             return
 
+        minimum_balance = (victim_bal + 1) // 2
+        if robber_bal * 2 < victim_bal:
+            await interaction.response.send_message(
+                f"❌ Bạn chưa đủ điều kiện cướp! Số dư của bạn phải ít nhất bằng **50%** số dư của {self.victim.mention}.\n\n"
+                f"💰 Bạn đang có: **{format_money(robber_bal)}**\n"
+                f"🎯 Cần ít nhất: **{format_money(minimum_balance)}**\n\n"
+                f"*{FOOTER_TEXT}*",
+                ephemeral=True
+            )
+            return
+
         # Disable tất cả nút bấm
         for item in self.children:
             item.disabled = True
@@ -1139,6 +1150,19 @@ async def cuop(
     if member.id == interaction.user.id:
         await interaction.response.send_message(
             f'Bạn không thể tự cướp chính mình!\n\n*{FOOTER_TEXT}*',
+            ephemeral=True
+        )
+        return
+
+    robber_balance, _ = get_user(interaction.user.id)
+    victim_balance, _ = get_user(member.id)
+    minimum_balance = (victim_balance + 1) // 2
+    if robber_balance * 2 < victim_balance:
+        await interaction.response.send_message(
+            f'❌ Bạn chưa đủ điều kiện cướp! Số dư của bạn phải ít nhất bằng **50%** số dư của {member.mention}.\n\n'
+            f'💰 Bạn đang có: **{format_money(robber_balance)}**\n'
+            f'🎯 Cần ít nhất: **{format_money(minimum_balance)}**\n\n'
+            f'*{FOOTER_TEXT}*',
             ephemeral=True
         )
         return
